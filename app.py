@@ -1,189 +1,108 @@
 import streamlit as st
 import yfinance as yf
+import requests
 import pandas as pd
-import numpy as np
-import google.generativeai as genai
-import plotly.express as px  # 引入繪圖神器
+from datetime import datetime
 
-# ==========================================
-# 🔑 設定 API Key
-# ==========================================
-# 雲端版讀取 Key 的方式
-import os
-# 如果在 Hugging Face，它會從 Secrets 讀取；如果在本地，請手動填入
-GENAI_API_KEY = os.environ.get("GENAI_API_KEY", "AIzaSyD8oBaP663IpoU4E5UYlVsw2tCPZ7YUj1g")
+# 設定頁面標題與寬度
+st.set_page_config(page_title="永道 x PI 戰情室", page_icon="🦅", layout="centered")
 
-try:
-    genai.configure(api_key=GENAI_API_KEY)
-    AI_AVAILABLE = True
-except:
-    AI_AVAILABLE = False
+# --- 核心函數 ---
 
-st.set_page_config(page_title="美股資金戰情室", layout="wide")
+def get_headers():
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://tw.stock.yahoo.com/',
+    }
 
-# --- 設定：細分產業 ETF 清單 ---
-INDUSTRY_MAPPING = {
-    "SMH (半導體)": ["NVDA", "TSM", "AVGO", "AMD", "QCOM", "TXN", "MU", "INTC", "AMAT", "LRCX"],
-    "IGV (軟體 SaaS)": ["MSFT", "ADBE", "CRM", "ORCL", "PLTR", "NOW", "SNOW", "PANW", "CRWD", "DDOG"],
-    "XBI (生物科技)": ["AMGN", "GILD", "VRTX", "REGN", "MRNA", "BNTX", "BIIB", "ILMN"],
-    "ITA (航太軍工)": ["RTX", "LMT", "BA", "GD", "NOC", "LHX", "HII", "GE"],
-    "KRE (區域銀行)": ["NYCB", "WAL", "KEY", "CFG", "FITB", "HBAN", "RF"],
-    "XHB (房屋建築)": ["DHI", "LEN", "PHM", "TOL", "HD", "LOW", "SHW"],
-    "TAN (太陽能/綠能)": ["FSLR", "ENPH", "SEDG", "RUN", "JKS", "CSIQ"],
-    "XLE (傳統能源)": ["XOM", "CVX", "COP", "SLB", "EOG", "OXY", "KMI"],
-    "XRT (零售消費)": ["AMZN", "WMT", "COST", "TGT", "HD", "LOW", "BBY"],
-    "IHI (醫療設備)": ["TMO", "ABT", "MDT", "SYK", "BSX", "EW", "ISRG"],
-    "JETS (航空旅運)": ["DAL", "UAL", "AAL", "LUV", "BKNG", "EXPE", "CCL", "RCL"],
-    "META (元宇宙/通訊)": ["META", "GOOGL", "NFLX", "DIS", "ROKU", "SNAP"],
-}
-INDUSTRY_ETFS = list(INDUSTRY_MAPPING.keys())
-
-# --- 輔助函數 ---
-def format_large_number(num):
-    """將數字轉換為 K, M, B (千, 百萬, 十億)"""
-    if num >= 1_000_000_000:
-        return f"${num / 1_000_000_000:.2f}B" # Billions
-    elif num >= 1_000_000:
-        return f"${num / 1_000_000:.2f}M" # Millions
-    else:
-        return f"${num:.2f}"
-
-def get_sector_money_flow():
-    """計算板塊資金流向與漲跌幅"""
-    tickers = [s.split()[0] for s in INDUSTRY_ETFS]
+def get_impinj_data():
     try:
-        data = yf.download(tickers, period="5d", progress=False)
-        if data.empty: return pd.DataFrame()
+        ticker = yf.Ticker("PI")
+        hist = ticker.history(period="5d")
+        if hist.empty: return None
         
-        close = data['Close']
-        volume = data['Volume']
-        
-        # 計算當日數據
-        latest_close = close.iloc[-1]
-        prev_close = close.iloc[-2]
-        latest_vol = volume.iloc[-1]
-        
-        # 漲跌幅
-        pct_change = (latest_close - prev_close) / prev_close * 100
-        
-        # 估算成交金額 (Money Flow) = 收盤價 * 成交量
-        money_flow = latest_close * latest_vol
-        
-        # 整理成 DataFrame
-        results = []
-        for code in tickers:
-            full_name = next((name for name in INDUSTRY_ETFS if name.startswith(code)), code)
-            results.append({
-                "Sector": full_name,
-                "Ticker": code,
-                "Change (%)": pct_change[code],
-                "Money Flow ($)": money_flow[code],
-                "Raw Money Flow": money_flow[code] # 用於排序
-            })
-            
-        return pd.DataFrame(results)
-    except Exception as e:
-        st.error(f"數據抓取失敗: {e}")
-        return pd.DataFrame()
-
-def analyze_top_stocks(sector_name):
-    """分析特定板塊內的前五大成交個股"""
-    tickers = INDUSTRY_MAPPING.get(sector_name, [])
-    try:
-        # 下載數據 (只抓一天即可，求速度)
-        df = yf.download(tickers, period="1d", progress=False)
-        
-        results = []
-        for ticker in tickers:
-            try:
-                price = df['Close'][ticker].iloc[-1]
-                vol = df['Volume'][ticker].iloc[-1]
-                turnover = price * vol
-                results.append({
-                    "Code": ticker,
-                    "Price": price,
-                    "Volume": vol,
-                    "Turnover": turnover
-                })
-            except:
-                continue
-        
-        # 依成交金額排序，取前 5
-        sorted_df = pd.DataFrame(results).sort_values(by="Turnover", ascending=False).head(5)
-        return sorted_df
+        curr = hist['Close'].iloc[-1]
+        prev = hist['Close'].iloc[-2]
+        change = curr - prev
+        pct = (change / prev) * 100
+        return curr, change, pct
     except:
-        return pd.DataFrame()
+        return None
+
+def get_arizon_revenue():
+    # 使用 Yahoo API
+    url = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.revenues;symbol=6863.TW;period=month"
+    try:
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        data = r.json()
+        if 'result' in data and data['result']:
+            latest = data['result'][0]
+            date_str = latest['date'][:7] # 2024-12
+            rev_亿 = float(latest['revenue']) / 100000
+            mom = float(latest['monthOverMonth'])
+            yoy = float(latest['yearOverYear'])
+            return date_str, rev_亿, mom, yoy
+    except Exception as e:
+        return None
 
 # --- UI 介面 ---
-st.title("📊 美股資金流向戰情室 (Money Flow Dashboard)")
-st.markdown("### 1. 全市場資金熱力圖 (Sector Heatmap)")
 
-if st.button("🚀 啟動戰情室分析", type="primary"):
+st.title("🦅 永道 (6863) x PI 監控站")
+st.caption(f"最後更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+if st.button("🔄 立即重新掃描", type="primary"):
+    st.rerun()
+
+st.divider()
+
+# 1. PI 區塊
+st.subheader("🇺🇸 Impinj (PI) 美股現況")
+pi_data = get_impinj_data()
+
+if pi_data:
+    price, change, pct = pi_data
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(label="現價 (USD)", value=f"${price:.2f}", delta=f"{change:.2f} ({pct:.2f}%)")
+    with col2:
+        if price < 170:
+            st.warning("⚠️ 跌破 $170 警戒線")
+        elif price > 180:
+            st.success("🔥 站上 $180 強勢區")
+        else:
+            st.info("⚖️ $170-$180 區間盤整")
+else:
+    st.error("❌ 無法獲取 PI 數據")
+
+st.divider()
+
+# 2. 永道區塊
+st.subheader("🇹🇼 永道-KY (6863) 營收")
+az_data = get_arizon_revenue()
+
+if az_data:
+    date_str, rev, mom, yoy = az_data
     
-    with st.spinner("正在計算全市場資金流向..."):
-        df_sector = get_sector_money_flow()
-        
-    if not df_sector.empty:
-        # 1. 繪製熱力圖 (Treemap)
-        # 顏色：紅綠 (漲跌)，大小：資金流向
-        fig = px.treemap(
-            df_sector, 
-            path=['Sector'], 
-            values='Raw Money Flow',
-            color='Change (%)',
-            color_continuous_scale=['red', 'black', 'green'],
-            color_continuous_midpoint=0,
-            hover_data={'Money Flow ($)': True, 'Change (%)': ':.2f'},
-            title="板塊資金熱力圖 (方塊越大=錢越多, 越綠=漲越兇)"
-        )
-        # 顯示金額格式
-        df_sector['Money Flow Label'] = df_sector['Raw Money Flow'].apply(format_large_number)
-        fig.data[0].customdata = df_sector[['Money Flow Label', 'Change (%)']]
-        fig.data[0].texttemplate = "%{label}<br>%{customdata[1]:.2f}%<br>%{customdata[0]}"
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # 2. 找出前三大資金流入板塊
-        st.divider()
-        st.markdown("### 2. 資金集中前三大類別 & 龍頭股")
-        
-        # 這裡我們依「漲跌幅」排序找強勢，或者依「資金量」排序找熱門
-        # 假設策略：找「漲幅前三名」的類別
-        top_3_sectors = df_sector.sort_values(by="Change (%)", ascending=False).head(3)
-        
-        all_top_stocks = [] # 用於收集所有強勢股代碼
-        
-        cols = st.columns(3)
-        for i, (index, row) in enumerate(top_3_sectors.iterrows()):
-            sector_name = row['Sector']
-            with cols[i]:
-                st.subheader(f"🏆 {sector_name}")
-                st.markdown(f"**漲幅:** {row['Change (%)']:.2f}% | **資金:** {format_large_number(row['Raw Money Flow'])}")
-                st.markdown("---")
-                
-                # 分析該類別前五大
-                top_stocks_df = analyze_top_stocks(sector_name)
-                
-                if not top_stocks_df.empty:
-                    for _, stock in top_stocks_df.iterrows():
-                        st.markdown(f"**{stock['Code']}**")
-                        st.caption(f"價: ${stock['Price']:.1f} | 量: {format_large_number(stock['Volume'])}")
-                        st.caption(f"成交額: {format_large_number(stock['Turnover'])}")
-                        all_top_stocks.append(stock['Code'])
-                else:
-                    st.write("無數據")
-
-        # 3. 生成複製清單 (解決需求 4)
-        st.divider()
-        st.markdown("### 3. 串接分析 (Export to AI Model)")
-        st.info("您可以複製下方的強勢股清單，貼到您的舊版 App 或其他工具進行深度分析。")
-        
-        # 將代碼轉為字串 "NVDA, AMD, TSM..."
-        stock_list_str = ", ".join(all_top_stocks)
-        st.code(stock_list_str, language="text")
-        
-        st.markdown(f"👉 [點擊前往您的舊版 App (Stock-AI-v3)](https://huggingface.co/spaces/AnsonTW/Stock-AI-v3)")
-        st.markdown("**操作提示：** 複製上方的代碼，點擊連結開啟舊 App，貼入輸入框即可執行。")
-        
+    # 判斷是否為 12 月
+    is_dec = "12" in date_str or "01" in date_str # 寬鬆判斷
+    
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("月份", date_str, "🆕" if is_dec else "⏳ 舊數據")
+    col_b.metric("單月營收", f"{rev:.2f} 億", f"{mom}% (月增)")
+    col_c.metric("年增率", f"{yoy}%", delta_color="off")
+    
+    st.markdown("### 🤖 1/10 決策訊號")
+    if rev >= 3.5:
+        st.success("🟢 **強力買進 (Strong Buy)**：營收大爆發，PI 財報將優於預期。")
+    elif rev >= 3.3:
+        st.info("🟡 **偏多操作 (Buy)**：營收穩健，PI 回檔可接。")
+    elif rev <= 3.0:
+        st.error("🔴 **觀望/賣出 (Sell)**：營收不如預期，PI 恐補跌。")
     else:
-        st.error("無法取得市場數據，請稍後再試。")
+        st.warning("⚪ **中性觀望**：數據平平，等待方向。")
+        
+    if not is_dec:
+        st.caption("⚠️ 注意：目前顯示的仍是 11 月數據，12 月營收尚未公布。")
+else:
+    st.error("❌ 永道數據抓取失敗 (IP 被擋)")
+    st.markdown("[點此手動前往 Yahoo 股市查看](https://tw.stock.yahoo.com/quote/6863/revenue)")
